@@ -147,6 +147,12 @@ class DirectDepthAnythingV2:
         self.model_name = None
         self.model = None
 
+    def set_device(self, device: torch.device):
+        if self.device == device:
+            return
+        self.unload()
+        self.device = device
+
     def predict(self, image: np.ndarray, model_name: str) -> np.ndarray:
         self.load(model_name)
         assert self.model is not None

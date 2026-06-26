@@ -27,6 +27,7 @@ from ss_stereoscope_depth.direct_depth import DirectDepthAnythingV2, MODEL_SPECS
 
 TITLE = "SS Stereoscope"
 MODEL_IDS = list(MODEL_SPECS.keys())
+DEPTH_DEVICE_CHOICES = ["CPU (low VRAM)", "CUDA (fast)", "Auto (CUDA then CPU fallback)"]
 
 
 def _resampling_nearest():
@@ -68,14 +69,32 @@ def _blur_depth(depth: np.ndarray, blur_radius: int) -> np.ndarray:
 class DepthEstimator:
     def __init__(self):
         self.model_name = None
-        self.device = devices.device
+        self.device = torch.device("cpu")
         self.backend = DirectDepthAnythingV2(
             device=self.device,
             models_dir=Path(shared.models_path),
             input_size=518,
         )
 
-    def load(self, model_name: str):
+    @staticmethod
+    def is_cuda_oom(exc: BaseException) -> bool:
+        message = str(exc).lower()
+        return "cuda out of memory" in message or "cublas_status_alloc_failed" in message
+
+    def select_device(self, depth_device: str) -> torch.device:
+        if depth_device == "CUDA (fast)" or depth_device == "Auto (CUDA then CPU fallback)":
+            return devices.device
+        return torch.device("cpu")
+
+    def load(self, model_name: str, depth_device: str):
+        selected_device = self.select_device(depth_device)
+        previous_device = self.device
+        self.backend.set_device(selected_device)
+        self.device = selected_device
+        if previous_device != selected_device:
+            gc.collect()
+            devices.torch_gc()
+
         if self.model_name == model_name:
             return
 
@@ -88,13 +107,29 @@ class DepthEstimator:
         gc.collect()
         devices.torch_gc()
 
-    def predict(self, image: Image.Image, model_name: str, blur_radius: int) -> np.ndarray:
+    def predict(self, image: Image.Image, model_name: str, blur_radius: int, depth_device: str) -> np.ndarray:
         try:
-            self.load(model_name)
+            self.load(model_name, depth_device)
             depth = self.backend.predict(np.array(image.convert("RGB")), model_name)
             depth = 1.0 - _normalize_depth(depth)
             return _blur_depth(depth, blur_radius)
         except DepthModelError:
+            raise
+        except RuntimeError as exc:
+            if self.is_cuda_oom(exc):
+                if depth_device == "Auto (CUDA then CPU fallback)":
+                    print("[SS Stereoscope] CUDA depth inference ran out of memory; retrying on CPU.")
+                    self.unload()
+                    devices.torch_gc()
+                    self.load(model_name, "CPU (low VRAM)")
+                    depth = self.backend.predict(np.array(image.convert("RGB")), model_name)
+                    depth = 1.0 - _normalize_depth(depth)
+                    return _blur_depth(depth, blur_radius)
+
+                raise DepthModelError(
+                    "CUDA ran out of memory while loading/running Depth Anything. "
+                    "Set Depth device to CPU (low VRAM) or Auto."
+                ) from exc
             raise
         except Exception as exc:
             print("[SS Stereoscope] Depth model failed.")
@@ -121,11 +156,12 @@ class StereoscopeEngine:
         invert_depth: bool,
         mode: str,
         model_name: str,
+        depth_device: str,
     ) -> StereoscopeResult:
         rgb_image = image.convert("RGB")
         width, height = rgb_image.size
 
-        depth = self.depth_estimator.predict(rgb_image, model_name, blur_radius)
+        depth = self.depth_estimator.predict(rgb_image, model_name, blur_radius, depth_device)
         if invert_depth:
             depth = 1.0 - depth
 
@@ -191,6 +227,11 @@ class Script(scripts.Script):
                 value="Depth Anything V2 - Small",
                 label="Depth model",
             )
+            depth_device = gr.Dropdown(
+                choices=DEPTH_DEVICE_CHOICES,
+                value="CPU (low VRAM)",
+                label="Depth device",
+            )
             mode = gr.Radio(["Parallel", "Cross-eyed"], value="Parallel", label="Viewing mode")
             depth_scale = gr.Slider(1.0, 100.0, value=40.0, step=0.5, label="Depth scale")
             blur_radius = gr.Slider(0, 51, value=3, step=1, label="Depth blur radius")
@@ -199,13 +240,25 @@ class Script(scripts.Script):
             save_depth = gr.Checkbox(True, label="Save depth map")
             unload_model = gr.Checkbox(False, label="Unload depth model after each image")
 
-        return [enabled, model_name, mode, depth_scale, blur_radius, fill_radius, invert_depth, save_depth, unload_model]
+        return [
+            enabled,
+            model_name,
+            depth_device,
+            mode,
+            depth_scale,
+            blur_radius,
+            fill_radius,
+            invert_depth,
+            save_depth,
+            unload_model,
+        ]
 
     def before_process(
         self,
         p,
         enabled,
         model_name,
+        depth_device,
         mode,
         depth_scale,
         blur_radius,
@@ -222,6 +275,7 @@ class Script(scripts.Script):
         pp: scripts.PostprocessImageArgs,
         enabled,
         model_name,
+        depth_device,
         mode,
         depth_scale,
         blur_radius,
@@ -246,6 +300,7 @@ class Script(scripts.Script):
                 invert_depth=bool(invert_depth),
                 mode=mode,
                 model_name=model_name,
+                depth_device=depth_device,
             )
         except DepthModelError as exc:
             print(f"[SS Stereoscope] Skipped: {exc}")
