@@ -21,7 +21,7 @@ The final txt2img image becomes SBS output. If `Save depth map` is enabled, the 
 
 ## Notes
 
-Depth Anything V2 needs `transformers>=4.51.0`. If depth generation is skipped, restart WebUI so `install.py` can upgrade the dependency, or install it manually in the WebUI Python environment.
+Depth Anything V2 needs `transformers>=4.51.0,<5`. If depth generation is skipped, restart WebUI so `install.py` can upgrade the dependency, or install it manually in the WebUI Python environment.
 
 The extension keeps standard WebUI PNG infotext clean, so generated SBS images can still be sent back to txt2img from gallery tools.
 

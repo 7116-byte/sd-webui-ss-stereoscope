@@ -18,8 +18,8 @@ try:
 except PackageNotFoundError:
     transformers_version = "0"
 
-if parse_version(transformers_version) < (4, 51, 0):
-    launch.run_pip("install -U \"transformers>=4.51.0\"", "requirements for SS Stereoscope")
+if parse_version(transformers_version) < (4, 51, 0) or parse_version(transformers_version) >= (5, 0, 0):
+    launch.run_pip("install -U \"transformers>=4.51.0,<5\"", "requirements for SS Stereoscope")
 
 if not launch.is_installed("cv2"):
     launch.run_pip("install opencv-python", "requirements for SS Stereoscope")
