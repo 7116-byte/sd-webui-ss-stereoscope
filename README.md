@@ -19,6 +19,12 @@ The final txt2img image becomes SBS output. If `Save depth map` is enabled, the 
 - Edge fill radius: `10`
 - Depth model: `Depth Anything V2 - Small`
 
+## Notes
+
+Depth Anything V2 needs `transformers>=4.51.0`. If depth generation is skipped, restart WebUI so `install.py` can upgrade the dependency, or install it manually in the WebUI Python environment.
+
+The extension keeps standard WebUI PNG infotext clean, so generated SBS images can still be sent back to txt2img from gallery tools.
+
 ## Attribution
 
 This extension ports the txt2img-friendly parts of the SBS workflow inspired by `SamSeenX/ComfyUI_SSStereoscope`, with defaults oriented toward parallel-eye output.

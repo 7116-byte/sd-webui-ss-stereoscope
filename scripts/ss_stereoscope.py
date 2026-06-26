@@ -3,6 +3,7 @@ from __future__ import annotations
 import gc
 import traceback
 from dataclasses import dataclass
+from importlib.metadata import PackageNotFoundError, version
 
 import gradio as gr
 import numpy as np
@@ -24,6 +25,7 @@ except Exception:
 
 
 TITLE = "SS Stereoscope"
+MIN_TRANSFORMERS_VERSION = (4, 51, 0)
 
 
 MODEL_IDS = {
@@ -34,6 +36,16 @@ MODEL_IDS = {
     "Depth Anything V3 - Base": "depth-anything/DA3-Base",
     "Depth Anything V3 - Large": "depth-anything/DA3-Large",
 }
+
+
+def _parse_version(value: str) -> tuple[int, ...]:
+    parts = []
+    for part in value.split("."):
+        digits = "".join(ch for ch in part if ch.isdigit())
+        if digits == "":
+            break
+        parts.append(int(digits))
+    return tuple(parts)
 
 
 def _resampling_nearest():
@@ -52,6 +64,10 @@ def _normalize_depth(depth: np.ndarray) -> np.ndarray:
 def _gradient_depth(width: int, height: int) -> np.ndarray:
     row = np.linspace(1.0, 0.0, width, dtype=np.float32)
     return np.tile(row, (height, 1))
+
+
+class DepthModelError(RuntimeError):
+    pass
 
 
 def _blur_depth(depth: np.ndarray, blur_radius: int) -> np.ndarray:
@@ -87,7 +103,19 @@ class DepthEstimator:
         self.unload()
 
         if AutoImageProcessor is None or AutoModelForDepthEstimation is None:
-            raise RuntimeError("transformers depth-estimation classes are unavailable")
+            raise DepthModelError("transformers depth-estimation classes are unavailable")
+
+        try:
+            transformers_version = version("transformers")
+        except PackageNotFoundError as exc:
+            raise DepthModelError("transformers is not installed") from exc
+
+        if _parse_version(transformers_version) < MIN_TRANSFORMERS_VERSION:
+            required = ".".join(str(part) for part in MIN_TRANSFORMERS_VERSION)
+            raise DepthModelError(
+                f"transformers {transformers_version} does not support Depth Anything V2. "
+                f"Install transformers>={required} and restart WebUI."
+            )
 
         model_id = MODEL_IDS[model_name]
         print(f"[SS Stereoscope] Loading depth model: {model_id}")
@@ -129,10 +157,12 @@ class DepthEstimator:
             depth = prediction.detach().float().cpu().numpy()
             depth = 1.0 - _normalize_depth(depth)
             return _blur_depth(depth, blur_radius)
-        except Exception:
-            print("[SS Stereoscope] Depth model failed; using fallback gradient depth.")
+        except DepthModelError:
+            raise
+        except Exception as exc:
+            print("[SS Stereoscope] Depth model failed.")
             print(traceback.format_exc())
-            return _blur_depth(_gradient_depth(width, height), blur_radius)
+            raise DepthModelError("Depth model failed; see console for traceback.") from exc
 
 
 @dataclass
@@ -196,7 +226,10 @@ class StereoscopeEngine:
                 sbs_image[valid_rows, valid_x + target_eye_offset] = source_pixels[valid_rows]
 
         depth_rgb = Image.merge("RGB", (depth_img, depth_img, depth_img))
-        return StereoscopeResult(Image.fromarray(sbs_image, mode="RGB"), depth_rgb)
+        sbs = Image.fromarray(sbs_image, mode="RGB")
+        sbs.info.update(image.info)
+        depth_rgb.info.update(image.info)
+        return StereoscopeResult(sbs, depth_rgb)
 
 
 ENGINE = StereoscopeEngine()
@@ -229,16 +262,6 @@ class Script(scripts.Script):
             save_depth = gr.Checkbox(True, label="Save depth map")
             unload_model = gr.Checkbox(False, label="Unload depth model after each image")
 
-        self.infotext_fields = [
-            (enabled, "SS Stereoscope enabled"),
-            (model_name, "SS Stereoscope model"),
-            (mode, "SS Stereoscope mode"),
-            (depth_scale, "SS Stereoscope depth scale"),
-            (blur_radius, "SS Stereoscope blur radius"),
-            (fill_radius, "SS Stereoscope fill radius"),
-            (invert_depth, "SS Stereoscope invert depth"),
-        ]
-
         return [enabled, model_name, mode, depth_scale, blur_radius, fill_radius, invert_depth, save_depth, unload_model]
 
     def before_process(
@@ -255,16 +278,6 @@ class Script(scripts.Script):
         unload_model,
     ):
         self._image_index = 0
-        if not enabled:
-            return
-
-        p.extra_generation_params["SS Stereoscope"] = True
-        p.extra_generation_params["SS Stereoscope model"] = model_name
-        p.extra_generation_params["SS Stereoscope mode"] = mode
-        p.extra_generation_params["SS Stereoscope depth scale"] = depth_scale
-        p.extra_generation_params["SS Stereoscope blur radius"] = blur_radius
-        p.extra_generation_params["SS Stereoscope fill radius"] = fill_radius
-        p.extra_generation_params["SS Stereoscope invert depth"] = invert_depth
 
     def postprocess_image(
         self,
@@ -287,15 +300,24 @@ class Script(scripts.Script):
         self._image_index += 1
 
         print(f"[SS Stereoscope] Processing txt2img output #{index + 1}")
-        result = ENGINE.create_sbs(
-            pp.image,
-            depth_scale=depth_scale,
-            blur_radius=int(blur_radius),
-            fill_radius=int(fill_radius),
-            invert_depth=bool(invert_depth),
-            mode=mode,
-            model_name=model_name,
-        )
+        try:
+            result = ENGINE.create_sbs(
+                pp.image,
+                depth_scale=depth_scale,
+                blur_radius=int(blur_radius),
+                fill_radius=int(fill_radius),
+                invert_depth=bool(invert_depth),
+                mode=mode,
+                model_name=model_name,
+            )
+        except DepthModelError as exc:
+            print(f"[SS Stereoscope] Skipped: {exc}")
+            return
+
+        infotext = self.create_infotext(p, index)
+        if infotext:
+            result.sbs.info["parameters"] = infotext
+            result.depth.info["parameters"] = infotext
 
         if save_depth:
             from modules import images
@@ -311,8 +333,9 @@ class Script(scripts.Script):
                 seed=seed,
                 prompt=prompt,
                 extension=shared.opts.samples_format,
-                info=getattr(p, "infotext", lambda *_args, **_kwargs: None)(index) if hasattr(p, "infotext") else None,
+                info=infotext,
                 p=p,
+                existing_info=result.depth.info,
                 suffix="-ss-depth",
             )
 
@@ -320,3 +343,22 @@ class Script(scripts.Script):
 
         if unload_model:
             ENGINE.depth_estimator.unload()
+
+    @staticmethod
+    def create_infotext(p, index: int) -> str | None:
+        try:
+            from modules.processing import create_infotext
+
+            return create_infotext(
+                p,
+                p.prompts,
+                p.seeds,
+                p.subseeds,
+                use_main_prompt=False,
+                index=index,
+                all_negative_prompts=p.negative_prompts,
+            )
+        except Exception:
+            print("[SS Stereoscope] Failed to create infotext for depth map.")
+            print(traceback.format_exc())
+            return None
