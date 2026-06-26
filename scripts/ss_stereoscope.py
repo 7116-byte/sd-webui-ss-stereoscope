@@ -61,11 +61,6 @@ def _normalize_depth(depth: np.ndarray) -> np.ndarray:
     return (depth - depth_min) / (depth_max - depth_min)
 
 
-def _gradient_depth(width: int, height: int) -> np.ndarray:
-    row = np.linspace(1.0, 0.0, width, dtype=np.float32)
-    return np.tile(row, (height, 1))
-
-
 class DepthModelError(RuntimeError):
     pass
 
@@ -114,7 +109,7 @@ class DepthEstimator:
             required = ".".join(str(part) for part in MIN_TRANSFORMERS_VERSION)
             raise DepthModelError(
                 f"transformers {transformers_version} does not support Depth Anything V2. "
-                f"Install transformers>={required} and restart WebUI."
+                f"Need a compatible isolated depth backend or transformers>={required}."
             )
 
         model_id = MODEL_IDS[model_name]
