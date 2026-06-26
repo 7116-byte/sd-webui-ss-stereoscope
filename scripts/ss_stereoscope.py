@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import gc
+import sys
 import traceback
 from dataclasses import dataclass
-from importlib.metadata import PackageNotFoundError, version
+from pathlib import Path
 
 import gradio as gr
 import numpy as np
@@ -17,35 +18,15 @@ try:
 except Exception:
     cv2 = None
 
-try:
-    from transformers import AutoImageProcessor, AutoModelForDepthEstimation
-except Exception:
-    AutoImageProcessor = None
-    AutoModelForDepthEstimation = None
+EXTENSION_DIR = Path(__file__).resolve().parents[1]
+if str(EXTENSION_DIR) not in sys.path:
+    sys.path.insert(0, str(EXTENSION_DIR))
+
+from ss_stereoscope_depth.direct_depth import DirectDepthAnythingV2, MODEL_SPECS
 
 
 TITLE = "SS Stereoscope"
-MIN_TRANSFORMERS_VERSION = (4, 51, 0)
-
-
-MODEL_IDS = {
-    "Depth Anything V2 - Small": "depth-anything/Depth-Anything-V2-Small-hf",
-    "Depth Anything V2 - Base": "depth-anything/Depth-Anything-V2-Base-hf",
-    "Depth Anything V2 - Large": "depth-anything/Depth-Anything-V2-Large-hf",
-    "Depth Anything V3 - Small": "depth-anything/DA3-Small",
-    "Depth Anything V3 - Base": "depth-anything/DA3-Base",
-    "Depth Anything V3 - Large": "depth-anything/DA3-Large",
-}
-
-
-def _parse_version(value: str) -> tuple[int, ...]:
-    parts = []
-    for part in value.split("."):
-        digits = "".join(ch for ch in part if ch.isdigit())
-        if digits == "":
-            break
-        parts.append(int(digits))
-    return tuple(parts)
+MODEL_IDS = list(MODEL_SPECS.keys())
 
 
 def _resampling_nearest():
@@ -87,69 +68,30 @@ def _blur_depth(depth: np.ndarray, blur_radius: int) -> np.ndarray:
 class DepthEstimator:
     def __init__(self):
         self.model_name = None
-        self.processor = None
-        self.model = None
         self.device = devices.device
+        self.backend = DirectDepthAnythingV2(
+            device=self.device,
+            models_dir=Path(shared.models_path),
+            input_size=518,
+        )
 
     def load(self, model_name: str):
-        if self.model_name == model_name and self.model is not None and self.processor is not None:
+        if self.model_name == model_name:
             return
 
-        self.unload()
-
-        if AutoImageProcessor is None or AutoModelForDepthEstimation is None:
-            raise DepthModelError("transformers depth-estimation classes are unavailable")
-
-        try:
-            transformers_version = version("transformers")
-        except PackageNotFoundError as exc:
-            raise DepthModelError("transformers is not installed") from exc
-
-        if _parse_version(transformers_version) < MIN_TRANSFORMERS_VERSION:
-            required = ".".join(str(part) for part in MIN_TRANSFORMERS_VERSION)
-            raise DepthModelError(
-                f"transformers {transformers_version} does not support Depth Anything V2. "
-                f"Need a compatible isolated depth backend or transformers>={required}."
-            )
-
-        model_id = MODEL_IDS[model_name]
-        print(f"[SS Stereoscope] Loading depth model: {model_id}")
-        self.processor = AutoImageProcessor.from_pretrained(model_id)
-        self.model = AutoModelForDepthEstimation.from_pretrained(model_id)
-        self.model.to(self.device)
-        self.model.eval()
+        self.backend.load(model_name)
         self.model_name = model_name
 
     def unload(self):
-        self.processor = None
-        self.model = None
+        self.backend.unload()
         self.model_name = None
         gc.collect()
         devices.torch_gc()
 
     def predict(self, image: Image.Image, model_name: str, blur_radius: int) -> np.ndarray:
-        width, height = image.size
-
         try:
             self.load(model_name)
-            assert self.processor is not None
-            assert self.model is not None
-
-            inputs = self.processor(images=image, return_tensors="pt")
-            inputs = {key: value.to(self.device) for key, value in inputs.items()}
-
-            with torch.inference_mode():
-                outputs = self.model(**inputs)
-                predicted_depth = outputs.predicted_depth
-
-            prediction = torch.nn.functional.interpolate(
-                predicted_depth.unsqueeze(1),
-                size=(height, width),
-                mode="bicubic",
-                align_corners=False,
-            ).squeeze()
-
-            depth = prediction.detach().float().cpu().numpy()
+            depth = self.backend.predict(np.array(image.convert("RGB")), model_name)
             depth = 1.0 - _normalize_depth(depth)
             return _blur_depth(depth, blur_radius)
         except DepthModelError:
@@ -245,7 +187,7 @@ class Script(scripts.Script):
         with gr.Accordion(TITLE, open=False):
             enabled = gr.Checkbox(False, label="Enable")
             model_name = gr.Dropdown(
-                choices=list(MODEL_IDS.keys()),
+                choices=MODEL_IDS,
                 value="Depth Anything V2 - Small",
                 label="Depth model",
             )

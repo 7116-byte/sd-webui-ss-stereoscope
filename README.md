@@ -21,7 +21,9 @@ The final txt2img image becomes SBS output. If `Save depth map` is enabled, the 
 
 ## Notes
 
-Depth Anything V2 needs a newer `transformers` release than some WebUI bundles ship with. This extension does not auto-upgrade WebUI's shared Python dependencies because doing so can break gallery and PNG infotext features. If the bundled dependency is too old, depth generation is skipped and the console explains why.
+Depth Anything V2 is vendored as a direct torch backend. The extension does not auto-upgrade WebUI's shared `transformers` dependency because doing so can break gallery and PNG infotext features.
+
+Depth weights are stored in `models/depthanything` and download automatically on first use. If Hugging Face is slow, download `depth_anything_v2_vits.pth` manually from `depth-anything/Depth-Anything-V2-Small` and place it in that folder.
 
 The extension keeps standard WebUI PNG infotext clean, so generated SBS images can still be sent back to txt2img from gallery tools.
 
